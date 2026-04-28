@@ -75,7 +75,8 @@ typedef enum {
     QISC_OP_STREAM_FILTER,
     QISC_OP_PIPELINE,   // >>
     QISC_OP_AWAIT_DATA, // Living Component
-    QISC_OP_EMIT        // Living Component
+    QISC_OP_EMIT,       // Living Component
+    QISC_OP_PHI         // SSA Phi node
 } qisc_opcode;
 
 // Values
@@ -122,6 +123,10 @@ struct qisc_ir_inst {
     qisc_ir_block* parent_block;
     qisc_ir_inst* next;
     qisc_ir_inst* prev;
+    
+    // SSA Phi node data
+    qisc_ir_block** phi_incoming_blocks;
+    size_t          phi_num_incoming;
     
     // Living components
     qisc_component_state comp_state;
@@ -218,5 +223,15 @@ void qisc_ir_record_mutation(qisc_ir_module* mod, const char* reason, uint64_t c
 uint64_t qisc_ir_compute_hash(qisc_ir_module* mod); // Hashes structure + profile data
 bool qisc_ir_serialize(qisc_ir_module* mod, const char* filepath);
 qisc_ir_module* qisc_ir_deserialize(const char* filepath);
+
+bool qisc_ir_validate_module(qisc_ir_module* mod, char* error_buf, size_t error_buf_len);
+void qisc_ir_print_module(qisc_ir_module* mod);
+
+qisc_ir_inst* qisc_ir_emit_phi(qisc_ir_block* block, qisc_type* type, qisc_ir_inst** incoming_values, qisc_ir_block** incoming_blocks, size_t count);
+
+qisc_value* qisc_value_float(double val);
+qisc_value* qisc_value_string(const char* str);
+qisc_value* qisc_value_bool(bool val);
+qisc_type* qisc_type_float(void);
 
 #endif // QISC_IR_H

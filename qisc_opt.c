@@ -7,6 +7,8 @@
 #include <string.h>
 #include <time.h>
 
+#include <assert.h>
+
 static double get_time_sec() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -50,6 +52,10 @@ bool qisc_pass_ssa_destruct_wrapper(qisc_ir_module* mod, uint64_t cycle) {
 bool qisc_pass_constant_fold(qisc_ir_module* mod, uint64_t cycle) {
     bool changed = false;
     for (qisc_ir_function* f = mod->first_func; f; f = f->next) {
+        if (!f->is_in_ssa_form) {
+            printf("Warning: Function %s not in SSA form, skipping constant fold.\n", f->name);
+            continue;
+        }
         for (qisc_ir_block* b = f->first_block; b; b = b->next) {
             for (qisc_ir_inst* i = b->first_inst; i; i = i->next) {
                 if ((i->opcode == QISC_OP_ADD || i->opcode == QISC_OP_SUB || 
@@ -70,7 +76,7 @@ bool qisc_pass_constant_fold(qisc_ir_module* mod, uint64_t cycle) {
                         
                         qisc_value* new_val = qisc_value_int(res);
                         replace_uses(f, i, new_val);
-                        free(new_val->type); free(new_val);
+                        free(new_val);
                         
                         qisc_ir_record_mutation(mod, "Constant fold ALU", cycle, f->name, i->id);
                         changed = true;
@@ -91,7 +97,7 @@ bool qisc_pass_constant_fold(qisc_ir_module* mod, uint64_t cycle) {
                         
                         qisc_value* new_val = qisc_value_int(res);
                         replace_uses(f, i, new_val);
-                        free(new_val->type); free(new_val);
+                        free(new_val);
                         
                         qisc_ir_record_mutation(mod, "Constant fold CMP", cycle, f->name, i->id);
                         changed = true;
@@ -141,6 +147,10 @@ bool qisc_pass_constant_fold(qisc_ir_module* mod, uint64_t cycle) {
 bool qisc_pass_copy_propagation(qisc_ir_module* mod, uint64_t cycle) {
     bool changed = false;
     for (qisc_ir_function* f = mod->first_func; f; f = f->next) {
+        if (!f->is_in_ssa_form) {
+            printf("Warning: Function %s not in SSA form, skipping copy propagation.\n", f->name);
+            continue;
+        }
         for (qisc_ir_block* b = f->first_block; b; b = b->next) {
             for (qisc_ir_inst* i = b->first_inst; i; i = i->next) {
                 for (size_t o=0; o<i->num_operands; o++) {
@@ -173,6 +183,7 @@ bool qisc_pass_copy_propagation(qisc_ir_module* mod, uint64_t cycle) {
 bool qisc_pass_inline(qisc_ir_module* mod, uint64_t cycle) {
     bool changed = false;
     for (qisc_ir_function* f = mod->first_func; f; f = f->next) {
+        assert(!f->is_in_ssa_form && "Cannot mutate CFG in SSA mode - call qisc_ssa_destruct first");
         if (!f->profile.is_hot) continue;
         for (qisc_ir_block* b = f->first_block; b; b = b->next) {
             for (qisc_ir_inst* i = b->first_inst; i; i = i->next) {
@@ -281,6 +292,7 @@ bool qisc_pass_inline(qisc_ir_module* mod, uint64_t cycle) {
                     
                     char msg[256]; snprintf(msg, sizeof(msg), "inlined %s into %s at inst %u", callee->name, f->name, i->id);
                     qisc_ir_record_mutation(mod, msg, cycle, f->name, i->id);
+                    if (f->cfg) qisc_cfg_invalidate(f->cfg);
                     changed = true;
                     break;
                 }
@@ -293,6 +305,7 @@ bool qisc_pass_inline(qisc_ir_module* mod, uint64_t cycle) {
 bool qisc_pass_cold_outline(qisc_ir_module* mod, uint64_t cycle) {
     bool changed = false;
     for (qisc_ir_function* f = mod->first_func; f; f = f->next) {
+        assert(!f->is_in_ssa_form && "Cannot mutate CFG in SSA mode - call qisc_ssa_destruct first");
         for (qisc_ir_block* b = f->first_block; b; b = b->next) {
             if (b == f->first_block) continue;
             if (b->profile.branch_probability < 0.05 && b->first_inst) {
@@ -377,6 +390,7 @@ bool qisc_pass_cold_outline(qisc_ir_module* mod, uint64_t cycle) {
                 
                 char msg[256]; snprintf(msg, sizeof(msg), "outlined cold block %s from %s", b->name, f->name);
                 qisc_ir_record_mutation(mod, msg, cycle, f->name, b->id);
+                if (f->cfg) qisc_cfg_invalidate(f->cfg);
                 changed = true;
             }
         }
@@ -387,6 +401,7 @@ bool qisc_pass_cold_outline(qisc_ir_module* mod, uint64_t cycle) {
 bool qisc_pass_specialize_constants(qisc_ir_module* mod, uint64_t cycle) {
     bool changed = false;
     for (qisc_ir_function* f = mod->first_func; f; f = f->next) {
+        assert(!f->is_in_ssa_form && "Cannot mutate CFG in SSA mode - call qisc_ssa_destruct first");
         int call_sites = 0;
         int64_t constant_val = 0;
         bool is_const_uniform = true;
@@ -473,6 +488,7 @@ bool qisc_pass_specialize_constants(qisc_ir_module* mod, uint64_t cycle) {
             
             char msg[256]; snprintf(msg, sizeof(msg), "specialized %s param 0 = %ld", f->name, (long)constant_val);
             qisc_ir_record_mutation(mod, msg, cycle, f->name, f->id);
+            if (f->cfg) qisc_cfg_invalidate(f->cfg);
             changed = true;
         }
     }
@@ -488,6 +504,10 @@ bool qisc_pass_dead_code_elimination(qisc_ir_module* mod, uint64_t cycle) {
         
         // Remove unreachable blocks
         for (qisc_ir_function* f = mod->first_func; f; f = f->next) {
+            if (!f->is_in_ssa_form) {
+                printf("Warning: Function %s not in SSA form, skipping dead code elimination.\n", f->name);
+                continue;
+            }
             qisc_cfg* cfg = qisc_cfg_build(f);
             for (size_t i = 0; i < cfg->num_nodes; i++) {
                 if (cfg->nodes[i].block && cfg->nodes[i].block != f->first_block) {
@@ -525,6 +545,7 @@ bool qisc_pass_dead_code_elimination(qisc_ir_module* mod, uint64_t cycle) {
         if (cascade) continue;
 
         for (qisc_ir_function* f = mod->first_func; f; f = f->next) {
+            if (!f->is_in_ssa_form) continue;
             for (qisc_ir_block* b = f->first_block; b; b = b->next) {
                 for (qisc_ir_inst* i = b->first_inst; i; i = i->next) {
                     for (size_t o=0; o<i->num_operands; o++) {
@@ -537,6 +558,7 @@ bool qisc_pass_dead_code_elimination(qisc_ir_module* mod, uint64_t cycle) {
         }
         
         for (qisc_ir_function* f = mod->first_func; f; f = f->next) {
+            if (!f->is_in_ssa_form) continue;
             for (qisc_ir_block* b = f->first_block; b; b = b->next) {
                 qisc_ir_inst* i = b->first_inst;
                 while (i) {
@@ -609,23 +631,37 @@ bool qisc_pipeline_run_once(qisc_pass_pipeline* p, qisc_ir_module* mod, uint64_t
     bool changed = false;
     for (size_t i=0; i<p->num_passes; i++) {
         qisc_pass* pass = &p->passes[i];
-        double start = get_time_sec();
-        
-        uint32_t mut_before = 0;
-        for(qisc_mutation_entry* e = mod->mutation_log->head; e; e = e->next) mut_before++;
-        
-        bool r = pass->run(mod, cycle);
-        
-        uint32_t mut_after = 0;
-        for(qisc_mutation_entry* e = mod->mutation_log->head; e; e = e->next) mut_after++;
-        
-        double end = get_time_sec();
-        pass->times_run++;
-        pass->total_mutations += (mut_after - mut_before);
-        pass->total_time_seconds += (end - start);
-        
-        if (r) changed = true;
+        if (pass->id == QISC_PASS_INLINE || pass->id == QISC_PASS_COLD_OUTLINE || pass->id == QISC_PASS_CONST_SPECIALIZE) {
+            double start = get_time_sec();
+            uint32_t mut_before = 0;
+            for(qisc_mutation_entry* e = mod->mutation_log->head; e; e = e->next) mut_before++;
+            bool r = pass->run(mod, cycle);
+            uint32_t mut_after = 0;
+            for(qisc_mutation_entry* e = mod->mutation_log->head; e; e = e->next) mut_after++;
+            double end = get_time_sec();
+            pass->times_run++; pass->total_mutations += (mut_after - mut_before); pass->total_time_seconds += (end - start);
+            if (r) changed = true;
+        }
     }
+    
+    qisc_ssa_construct(mod);
+    
+    for (size_t i=0; i<p->num_passes; i++) {
+        qisc_pass* pass = &p->passes[i];
+        if (pass->id == QISC_PASS_CONSTANT_FOLD || pass->id == QISC_PASS_COPY_PROPAGATION || pass->id == QISC_PASS_DEAD_CODE_ELIM) {
+            double start = get_time_sec();
+            uint32_t mut_before = 0;
+            for(qisc_mutation_entry* e = mod->mutation_log->head; e; e = e->next) mut_before++;
+            bool r = pass->run(mod, cycle);
+            uint32_t mut_after = 0;
+            for(qisc_mutation_entry* e = mod->mutation_log->head; e; e = e->next) mut_after++;
+            double end = get_time_sec();
+            pass->times_run++; pass->total_mutations += (mut_after - mut_before); pass->total_time_seconds += (end - start);
+            if (r) changed = true;
+        }
+    }
+    
+    qisc_ssa_destruct(mod);
     return changed;
 }
 
@@ -644,14 +680,24 @@ void qisc_pipeline_destroy(qisc_pass_pipeline* p) {
     free(p);
 }
 
-void qisc_opt_run_pipeline(qisc_ir_module* mod) {
-    qisc_pass_pipeline* p = qisc_pipeline_create();
-    uint64_t cycle = 1;
-    bool changed = true;
-    while (changed) {
-        changed = qisc_pipeline_run_once(p, mod, cycle);
-        cycle++;
-        if (cycle > 100) break;
-    }
-    qisc_pipeline_destroy(p);
+bool qisc_opt_run_pipeline_ssa(qisc_ir_module* mod, uint64_t cycle) {
+    bool changed = false;
+    
+    // Phase 1: structural mutations on TAC
+    changed |= qisc_pass_inline(mod, cycle);
+    changed |= qisc_pass_cold_outline(mod, cycle);
+    changed |= qisc_pass_specialize_constants(mod, cycle);
+    
+    // Phase 2: lift to SSA for analysis passes
+    qisc_ssa_construct(mod);
+    
+    // Phase 3: analysis passes in SSA form
+    changed |= qisc_pass_constant_fold(mod, cycle);
+    changed |= qisc_pass_copy_propagation(mod, cycle);
+    changed |= qisc_pass_dead_code_elimination(mod, cycle);
+    
+    // Phase 4: destruct SSA back to TAC
+    qisc_ssa_destruct(mod);
+    
+    return changed;
 }

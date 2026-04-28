@@ -110,6 +110,14 @@ qisc_ir_inst* qisc_ir_emit_inst(qisc_ir_block* block, qisc_opcode op, qisc_type*
     inst->type = type;
     inst->comp_state = QISC_STATE_DORMANT; // Default
     
+    if (op == QISC_OP_DIV) {
+        inst->requires_rax = true;
+        inst->clobbers_rdx = true;
+        inst->clobbers_rax = true;
+    } else if (op == QISC_OP_RET) {
+        inst->requires_rax = true;
+    }
+    
     if (num_operands > 0) {
         inst->operands = (qisc_value**)malloc(sizeof(qisc_value*) * num_operands);
         memcpy(inst->operands, operands, sizeof(qisc_value*) * num_operands);

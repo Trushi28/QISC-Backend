@@ -79,6 +79,26 @@ typedef enum {
     QISC_OP_PHI         // SSA Phi node
 } qisc_opcode;
 
+/*
+ * QISC IR Value Model:
+ * TAC mode (default, is_in_ssa_form=false):
+ *   - Instructions produce values via operand refs
+ *   - Multiple definitions of same logical var allowed
+ *   - Used for: Living IR mutations, cloning, 
+ *               serialization, profile-driven transforms
+ *
+ * SSA mode (is_in_ssa_form=true):
+ *   - Every instruction produces exactly ONE value
+ *   - No redefinition of values
+ *   - PHI nodes resolve control flow merges
+ *   - Used for: const folding, DCE, copy propagation
+ *   - Enter via: qisc_ssa_construct()
+ *   - Exit via:  qisc_ssa_destruct()
+ *
+ * Rule: NEVER mutate CFG (clone/outline/specialize)
+ * while is_in_ssa_form=true. Always destruct first.
+ */
+
 // Values
 typedef enum {
     QISC_VAL_CONST_INT,
@@ -127,6 +147,11 @@ struct qisc_ir_inst {
     // SSA Phi node data
     qisc_ir_block** phi_incoming_blocks;
     size_t          phi_num_incoming;
+    
+    // Instruction constraint flags
+    bool            requires_rax;
+    bool            clobbers_rdx;
+    bool            clobbers_rax;
     
     // Living components
     qisc_component_state comp_state;
@@ -179,6 +204,10 @@ struct qisc_ir_function {
     
     // Embedded profile data
     qisc_profile_data profile;
+    
+    // IR Mode state
+    bool is_in_ssa_form;
+    struct qisc_cfg* cfg;
 };
 
 // Module

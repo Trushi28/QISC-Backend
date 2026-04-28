@@ -3,6 +3,11 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <assert.h>
+
+void qisc_cfg_invalidate(qisc_cfg* cfg) {
+    if (cfg) cfg->is_valid = false;
+}
 
 static void add_edge(qisc_cfg_node* from, qisc_cfg_node* to, double prob) {
     qisc_cfg_edge* succ_edge = calloc(1, sizeof(qisc_cfg_edge));
@@ -28,11 +33,13 @@ static void add_edge(qisc_cfg_node* from, qisc_cfg_node* to, double prob) {
 qisc_cfg* qisc_cfg_build(qisc_ir_function* func) {
     qisc_cfg* cfg = calloc(1, sizeof(qisc_cfg));
     cfg->func = func;
+    func->cfg = cfg;
     
     size_t count = 0;
     for (qisc_ir_block* b = func->first_block; b; b = b->next) count++;
     cfg->num_nodes = count + 1; // +1 for synthetic exit
     cfg->nodes = calloc(cfg->num_nodes, sizeof(qisc_cfg_node));
+    cfg->is_valid = true;
     
     // Map block pointers to nodes
     qisc_cfg_node** node_map = calloc(10000, sizeof(qisc_cfg_node*));
@@ -155,6 +162,7 @@ static qisc_cfg_node* intersect(qisc_cfg_node* b1, qisc_cfg_node* b2) {
 }
 
 void qisc_cfg_compute_dominators(qisc_cfg* cfg) {
+    assert(cfg->is_valid && "CFG was mutated - rebuild before analysis");
     if (!cfg->entry) return;
     cfg->entry->idom = cfg->entry;
     
@@ -197,6 +205,7 @@ void qisc_cfg_compute_dominators(qisc_cfg* cfg) {
 }
 
 void qisc_cfg_compute_dominance_frontier(qisc_cfg* cfg) {
+    assert(cfg->is_valid && "CFG was mutated - rebuild before analysis");
     for (size_t i=0; i<cfg->num_nodes; i++) {
         qisc_cfg_node* b = &cfg->nodes[i];
         if (b->num_predecessors >= 2) {
@@ -218,7 +227,8 @@ void qisc_cfg_compute_dominance_frontier(qisc_cfg* cfg) {
     }
 }
 
-bool qisc_cfg_dominates(qisc_cfg_node* a, qisc_cfg_node* b) {
+bool qisc_cfg_dominates(qisc_cfg* cfg, qisc_cfg_node* a, qisc_cfg_node* b) {
+    assert(cfg->is_valid && "CFG was mutated - rebuild before analysis");
     if (!a || !b) return false;
     qisc_cfg_node* curr = b;
     while (curr && curr != curr->idom) {

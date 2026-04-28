@@ -89,9 +89,59 @@ qisc_ir_inst* qisc_ssa_read_variable_recursive(qisc_ssa_builder* b, uint32_t var
     return val;
 }
 
+static bool qisc_ssa_eliminate_trivial_phis(qisc_ir_module* mod) {
+    bool changed = false;
+    for (qisc_ir_function* f = mod->first_func; f; f = f->next) {
+        for (qisc_ir_block* b = f->first_block; b; b = b->next) {
+            qisc_ir_inst* i = b->first_inst;
+            while (i) {
+                qisc_ir_inst* next = i->next;
+                if (i->opcode == QISC_OP_PHI && i->num_operands > 0) {
+                    bool all_same = true;
+                    qisc_ir_inst* first_val = i->operands[0]->kind == QISC_VAL_INST ? i->operands[0]->as.inst : NULL;
+                    for (size_t op = 1; op < i->num_operands; op++) {
+                        qisc_ir_inst* op_inst = i->operands[op]->kind == QISC_VAL_INST ? i->operands[op]->as.inst : NULL;
+                        if (op_inst != first_val && op_inst != i) {
+                            all_same = false;
+                            break;
+                        }
+                    }
+                    if (all_same) {
+                        for (qisc_ir_function* af = mod->first_func; af; af = af->next) {
+                            for (qisc_ir_block* ab = af->first_block; ab; ab = ab->next) {
+                                for (qisc_ir_inst* ai = ab->first_inst; ai; ai = ai->next) {
+                                    for (size_t aop = 0; aop < ai->num_operands; aop++) {
+                                        if (ai->operands[aop]->kind == QISC_VAL_INST && ai->operands[aop]->as.inst == i) {
+                                            ai->operands[aop]->as.inst = first_val;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (i->prev) i->prev->next = i->next;
+                        if (i->next) i->next->prev = i->prev;
+                        if (b->first_inst == i) b->first_inst = i->next;
+                        if (b->last_inst == i) b->last_inst = i->prev;
+                        
+                        for(size_t op = 0; op < i->num_operands; op++) free(i->operands[op]);
+                        free(i->operands);
+                        free(i->phi_incoming_blocks);
+                        free(i);
+                        
+                        changed = true;
+                    }
+                }
+                i = next;
+            }
+        }
+    }
+    return changed;
+}
+
 bool qisc_ssa_construct(qisc_ir_module* mod) {
     bool inserted_phis = false;
     for (qisc_ir_function* f = mod->first_func; f; f = f->next) {
+        f->is_in_ssa_form = true;
         qisc_cfg* cfg = qisc_cfg_build(f);
         qisc_ssa_builder* b = qisc_ssa_create(cfg);
         
@@ -124,12 +174,16 @@ bool qisc_ssa_construct(qisc_ir_module* mod) {
         qisc_ssa_destroy(b);
         qisc_cfg_destroy(cfg);
     }
+    
+    while (qisc_ssa_eliminate_trivial_phis(mod));
+    
     return inserted_phis;
 }
 
 bool qisc_ssa_destruct(qisc_ir_module* mod) {
     bool processed = false;
     for (qisc_ir_function* f = mod->first_func; f; f = f->next) {
+        f->is_in_ssa_form = false;
         for (qisc_ir_block* b = f->first_block; b; b = b->next) {
             qisc_ir_inst* i = b->first_inst;
             while (i) {

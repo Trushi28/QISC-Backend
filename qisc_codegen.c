@@ -342,10 +342,10 @@ bool qisc_codegen_emit_elf(qisc_ir_module* mod, const char* filepath) {
         }
         
         int active[32]; int num_active = 0;
-        qisc_x86_reg avail_regs[] = {QISC_REG_RAX, QISC_REG_RCX, QISC_REG_RDX, QISC_REG_RSI, QISC_REG_RDI, QISC_REG_R8, QISC_REG_R9, QISC_REG_R10};
+        qisc_x86_reg avail_regs[] = {QISC_REG_RCX, QISC_REG_RSI, QISC_REG_RDI, QISC_REG_R8, QISC_REG_R9, QISC_REG_R10};
         bool reg_free[QISC_REG_COUNT];
         for(int i=0; i<QISC_REG_COUNT; i++) reg_free[i] = false;
-        for(int i=0; i<8; i++) reg_free[avail_regs[i]] = true;
+        for(int i=0; i<6; i++) reg_free[avail_regs[i]] = true;
         
         int next_stack_slot = 16;
         
@@ -408,10 +408,12 @@ bool qisc_codegen_emit_elf(qisc_ir_module* mod, const char* filepath) {
         
         uint32_t block_offsets[1000] = {0};
         qisc_branch_patch patches[1000]; int num_patches = 0;
+        int current_inst_index = 0;
         
         for(qisc_ir_block* b = f->first_block; b; b = b->next) {
             if (b->id < 1000) block_offsets[b->id] = bytebuf_here(buf);
             for(qisc_ir_inst* i = b->first_inst; i; i = i->next) {
+                current_inst_index++;
                 qisc_live_interval* inter = id_to_inter[i->id];
                 int dst_reg = (inter && inter->stack_slot != -1) ? 10 : (inter ? reg_to_id(inter->reg) : 0);
                 
@@ -425,7 +427,7 @@ bool qisc_codegen_emit_elf(qisc_ir_module* mod, const char* filepath) {
                 } else if (i->opcode == QISC_OP_ADD) {
                     if (i->type && i->type->kind == QISC_TYPE_FLOAT) {
                         int op0 = load_operand(buf, i->operands[0], id_to_inter, dst_reg, &rodata_buffer, r_relocs, &num_r_relocs, f);
-                        int op1 = load_operand(buf, i->operands[1], id_to_inter, 1, &rodata_buffer, r_relocs, &num_r_relocs, f);
+                        int op1 = load_operand(buf, i->operands[1], id_to_inter, (dst_reg == 1) ? 2 : 1, &rodata_buffer, r_relocs, &num_r_relocs, f);
                         if (dst_reg != op0) { bytebuf_push(buf, 0xF2); bytebuf_push(buf, 0x0F); bytebuf_push(buf, 0x10); emit_modrm(buf, 3, dst_reg, op0); }
                         bytebuf_push(buf, 0xF2); bytebuf_push(buf, 0x0F); bytebuf_push(buf, 0x58); emit_modrm(buf, 3, dst_reg, op1);
                     } else {
@@ -435,14 +437,21 @@ bool qisc_codegen_emit_elf(qisc_ir_module* mod, const char* filepath) {
                         emit_rex_op(buf, dst_reg, op1); bytebuf_push(buf, 0x03); emit_modrm(buf, 3, dst_reg, op1);
                     }
                 } else if (i->opcode == QISC_OP_SUB) {
-                    int op0 = load_operand(buf, i->operands[0], id_to_inter, dst_reg, &rodata_buffer, r_relocs, &num_r_relocs, f);
-                    if (dst_reg != op0) { emit_rex_op(buf, dst_reg, op0); bytebuf_push(buf, 0x8B); emit_modrm(buf, 3, dst_reg, op0); }
-                    int op1 = load_operand(buf, i->operands[1], id_to_inter, 11, &rodata_buffer, r_relocs, &num_r_relocs, f);
-                    emit_rex_op(buf, dst_reg, op1); bytebuf_push(buf, 0x2B); emit_modrm(buf, 3, dst_reg, op1);
+                    if (i->type && i->type->kind == QISC_TYPE_FLOAT) {
+                        int op0 = load_operand(buf, i->operands[0], id_to_inter, dst_reg, &rodata_buffer, r_relocs, &num_r_relocs, f);
+                        int op1 = load_operand(buf, i->operands[1], id_to_inter, (dst_reg == 1) ? 2 : 1, &rodata_buffer, r_relocs, &num_r_relocs, f);
+                        if (dst_reg != op0) { bytebuf_push(buf, 0xF2); bytebuf_push(buf, 0x0F); bytebuf_push(buf, 0x10); emit_modrm(buf, 3, dst_reg, op0); }
+                        bytebuf_push(buf, 0xF2); bytebuf_push(buf, 0x0F); bytebuf_push(buf, 0x5C); emit_modrm(buf, 3, dst_reg, op1);
+                    } else {
+                        int op0 = load_operand(buf, i->operands[0], id_to_inter, dst_reg, &rodata_buffer, r_relocs, &num_r_relocs, f);
+                        if (dst_reg != op0) { emit_rex_op(buf, dst_reg, op0); bytebuf_push(buf, 0x8B); emit_modrm(buf, 3, dst_reg, op0); }
+                        int op1 = load_operand(buf, i->operands[1], id_to_inter, 11, &rodata_buffer, r_relocs, &num_r_relocs, f);
+                        emit_rex_op(buf, dst_reg, op1); bytebuf_push(buf, 0x2B); emit_modrm(buf, 3, dst_reg, op1);
+                    }
                 } else if (i->opcode == QISC_OP_MUL) {
                     if (i->type && i->type->kind == QISC_TYPE_FLOAT) {
                         int op0 = load_operand(buf, i->operands[0], id_to_inter, dst_reg, &rodata_buffer, r_relocs, &num_r_relocs, f);
-                        int op1 = load_operand(buf, i->operands[1], id_to_inter, 1, &rodata_buffer, r_relocs, &num_r_relocs, f);
+                        int op1 = load_operand(buf, i->operands[1], id_to_inter, (dst_reg == 1) ? 2 : 1, &rodata_buffer, r_relocs, &num_r_relocs, f);
                         if (dst_reg != op0) { bytebuf_push(buf, 0xF2); bytebuf_push(buf, 0x0F); bytebuf_push(buf, 0x10); emit_modrm(buf, 3, dst_reg, op0); }
                         bytebuf_push(buf, 0xF2); bytebuf_push(buf, 0x0F); bytebuf_push(buf, 0x59); emit_modrm(buf, 3, dst_reg, op1);
                     } else {
@@ -452,12 +461,36 @@ bool qisc_codegen_emit_elf(qisc_ir_module* mod, const char* filepath) {
                         emit_rex_op(buf, dst_reg, op1); bytebuf_push(buf, 0x0F); bytebuf_push(buf, 0xAF); emit_modrm(buf, 3, dst_reg, op1);
                     }
                 } else if (i->opcode == QISC_OP_DIV) {
+                    if (i->type && i->type->kind == QISC_TYPE_FLOAT) {
+                        int op0 = load_operand(buf, i->operands[0], id_to_inter, dst_reg, &rodata_buffer, r_relocs, &num_r_relocs, f);
+                        int op1 = load_operand(buf, i->operands[1], id_to_inter, (dst_reg == 1) ? 2 : 1, &rodata_buffer, r_relocs, &num_r_relocs, f);
+                        if (dst_reg != op0) { bytebuf_push(buf, 0xF2); bytebuf_push(buf, 0x0F); bytebuf_push(buf, 0x10); emit_modrm(buf, 3, dst_reg, op0); }
+                        bytebuf_push(buf, 0xF2); bytebuf_push(buf, 0x0F); bytebuf_push(buf, 0x5E); emit_modrm(buf, 3, dst_reg, op1);
+                    } else {
+                        int rdx_spill_slot = -1;
+                    for (int j = 0; j < num_active; j++) {
+                        int act_idx = active[j];
+                        if (intervals[act_idx].reg == QISC_REG_RDX && intervals[act_idx].end > current_inst_index - 1) {
+                            rdx_spill_slot = next_stack_slot;
+                            next_stack_slot += 8;
+                            // mov [rbp-slot], rdx (RDX is reg 2)
+                            emit_rex_op(buf, 2, 5); bytebuf_push(buf, 0x89); emit_modrm(buf, 2, 2, 5);
+                            bytebuf_push_u32(buf, (uint32_t)(-rdx_spill_slot));
+                            break;
+                        }
+                    }
                     int op0 = load_operand(buf, i->operands[0], id_to_inter, 0, &rodata_buffer, r_relocs, &num_r_relocs, f);
                     if (op0 != 0) { emit_rex_op(buf, 0, op0); bytebuf_push(buf, 0x8B); emit_modrm(buf, 3, 0, op0); }
-                    bytebuf_push(buf, 0x48); bytebuf_push(buf, 0x99);
+                    bytebuf_push(buf, 0x48); bytebuf_push(buf, 0x99); // cqo
                     int op1 = load_operand(buf, i->operands[1], id_to_inter, 11, &rodata_buffer, r_relocs, &num_r_relocs, f);
                     emit_rex_op(buf, 0, op1); bytebuf_push(buf, 0xF7); emit_modrm(buf, 3, 7, op1);
+                    if (rdx_spill_slot != -1) {
+                        // mov rdx, [rbp-slot]
+                        emit_rex_op(buf, 2, 5); bytebuf_push(buf, 0x8B); emit_modrm(buf, 2, 2, 5);
+                        bytebuf_push_u32(buf, (uint32_t)(-rdx_spill_slot));
+                    }
                     if (dst_reg != 0) { emit_rex_op(buf, dst_reg, 0); bytebuf_push(buf, 0x8B); emit_modrm(buf, 3, dst_reg, 0); }
+                }
                 } else if (i->opcode == QISC_OP_CMP_EQ || i->opcode == QISC_OP_CMP_LT || i->opcode == QISC_OP_CMP_GT) {
                     int op0 = load_operand(buf, i->operands[0], id_to_inter, 11, &rodata_buffer, r_relocs, &num_r_relocs, f);
                     int op1 = load_operand(buf, i->operands[1], id_to_inter, 15, &rodata_buffer, r_relocs, &num_r_relocs, f);
@@ -501,7 +534,11 @@ bool qisc_codegen_emit_elf(qisc_ir_module* mod, const char* filepath) {
                 } else if (i->opcode == QISC_OP_RET) {
                     if (i->num_operands > 0) {
                         int op0 = load_operand(buf, i->operands[0], id_to_inter, 11, &rodata_buffer, r_relocs, &num_r_relocs, f);
-                        if (op0 != 0) { emit_rex_op(buf, 0, op0); bytebuf_push(buf, 0x8B); emit_modrm(buf, 3, 0, op0); }
+                        if (i->operands[0]->type && i->operands[0]->type->kind == QISC_TYPE_FLOAT) {
+                            if (op0 != 0) { bytebuf_push(buf, 0xF2); bytebuf_push(buf, 0x0F); bytebuf_push(buf, 0x10); emit_modrm(buf, 3, 0, op0); }
+                        } else {
+                            if (op0 != 0) { emit_rex_op(buf, 0, op0); bytebuf_push(buf, 0x8B); emit_modrm(buf, 3, 0, op0); }
+                        }
                     }
                     emit_epilogue(buf); bytebuf_push(buf, 0xC3);
                 } else if (i->opcode == QISC_OP_BR) {

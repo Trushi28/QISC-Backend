@@ -31,6 +31,9 @@ typedef struct qisc_component {
     void*                 output_data;
     size_t                output_data_size;
     
+    volatile bool         should_stop;
+    pthread_t             thread_id;
+    
     uint64_t              trigger_count;
     uint64_t              last_trigger_cycle;
     

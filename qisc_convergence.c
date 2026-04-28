@@ -36,7 +36,7 @@ qisc_convergence_cycle_result qisc_convergence_run_cycle(qisc_convergence_state*
     for(qisc_mutation_entry* e = mod->mutation_log->head; e; e = e->next) mut_before++;
     
     // Call pipeline to apply one round of passes
-    qisc_opt_run_pipeline(mod);
+    qisc_opt_run_pipeline_ssa(mod, state->num_cycles + 1);
     
     uint32_t mut_after = 0;
     for(qisc_mutation_entry* e = mod->mutation_log->head; e; e = e->next) mut_after++;

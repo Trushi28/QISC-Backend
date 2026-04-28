@@ -46,6 +46,6 @@ bool qisc_pass_ssa_construct_wrapper(qisc_ir_module* mod, uint64_t cycle);
 bool qisc_pass_ssa_destruct_wrapper(qisc_ir_module* mod, uint64_t cycle);
 
 // Kept for backward compatibility if needed by convergence
-void qisc_opt_run_pipeline(qisc_ir_module* mod);
+bool qisc_opt_run_pipeline_ssa(qisc_ir_module* mod, uint64_t cycle);
 
 #endif // QISC_OPT_H

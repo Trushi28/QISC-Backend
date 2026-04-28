@@ -22,6 +22,12 @@ void qisc_registry_destroy(qisc_component_registry* r) {
     qisc_component* curr = r->first;
     while (curr) {
         qisc_component* next = curr->next;
+        pthread_mutex_lock(&curr->state_lock);
+        curr->should_stop = true;
+        pthread_cond_signal(&curr->data_ready);
+        pthread_mutex_unlock(&curr->state_lock);
+        pthread_join(curr->thread_id, NULL);
+        
         pthread_mutex_destroy(&curr->state_lock);
         pthread_cond_destroy(&curr->data_ready);
         free(curr->inputs);
@@ -40,6 +46,7 @@ qisc_component* qisc_component_create(qisc_component_registry* registry, const c
     pthread_mutex_init(&comp->state_lock, NULL);
     pthread_cond_init(&comp->data_ready, NULL);
     comp->state = QISC_STATE_DORMANT;
+    comp->should_stop = false;
     comp->body = body;
     
     if (registry->last) {
@@ -88,8 +95,12 @@ void* qisc_component_run_loop(void* arg) {
     qisc_component* comp = (qisc_component*)arg;
     while (1) {
         pthread_mutex_lock(&comp->state_lock);
-        while (comp->state != QISC_STATE_TRIGGERED) {
+        while (comp->state != QISC_STATE_TRIGGERED && !comp->should_stop) {
             pthread_cond_wait(&comp->data_ready, &comp->state_lock);
+        }
+        if (comp->should_stop) {
+            pthread_mutex_unlock(&comp->state_lock);
+            return NULL;
         }
         comp->state = QISC_STATE_EXECUTING;
         void* data = comp->input_data;
@@ -122,9 +133,8 @@ void* qisc_component_run_loop(void* arg) {
 }
 
 pthread_t qisc_component_start(qisc_component* comp) {
-    pthread_t tid;
-    pthread_create(&tid, NULL, qisc_component_run_loop, comp);
-    return tid;
+    pthread_create(&comp->thread_id, NULL, qisc_component_run_loop, comp);
+    return comp->thread_id;
 }
 
 void qisc_registry_analyze_entanglement(qisc_component_registry* registry) {

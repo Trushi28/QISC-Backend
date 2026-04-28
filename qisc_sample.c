@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 int main(void) {
+    setbuf(stdout, NULL);
     qisc_ir_module* mod = qisc_ir_create_module();
     qisc_type* t_int = qisc_type_int();
     qisc_type* t_float = qisc_type_float();

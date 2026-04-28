@@ -27,18 +27,20 @@ typedef struct qisc_cfg_node {
     bool                visited;
 } qisc_cfg_node;
 
-typedef struct {
+typedef struct qisc_cfg {
     qisc_ir_function*   func;
     qisc_cfg_node*      nodes;      // array, one per block
     size_t              num_nodes;
     qisc_cfg_node*      entry;
     qisc_cfg_node*      exit;       // synthetic exit node
+    bool                is_valid;
 } qisc_cfg;
 
 qisc_cfg* qisc_cfg_build(qisc_ir_function* func);
+void qisc_cfg_invalidate(qisc_cfg* cfg);
 void qisc_cfg_compute_dominators(qisc_cfg* cfg);
 void qisc_cfg_compute_dominance_frontier(qisc_cfg* cfg);
-bool qisc_cfg_dominates(qisc_cfg_node* a, qisc_cfg_node* b);
+bool qisc_cfg_dominates(qisc_cfg* cfg, qisc_cfg_node* a, qisc_cfg_node* b);
 void qisc_cfg_print(qisc_cfg* cfg);
 void qisc_cfg_destroy(qisc_cfg* cfg);
 

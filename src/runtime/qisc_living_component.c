@@ -26,12 +26,22 @@ void qisc_registry_destroy(qisc_component_registry* r) {
         curr->should_stop = true;
         pthread_cond_signal(&curr->data_ready);
         pthread_mutex_unlock(&curr->state_lock);
-        pthread_join(curr->thread_id, NULL);
+        if (curr->thread_started) pthread_join(curr->thread_id, NULL);
         
         pthread_mutex_destroy(&curr->state_lock);
         pthread_cond_destroy(&curr->data_ready);
+        for (size_t i = 0; i < curr->num_inputs; i++) {
+            free((void*)curr->inputs[i].name);
+            free((void*)curr->inputs[i].endpoint);
+        }
+        for (size_t i = 0; i < curr->num_outputs; i++) {
+            free((void*)curr->outputs[i].name);
+            free((void*)curr->outputs[i].endpoint);
+        }
         free(curr->inputs);
         free(curr->outputs);
+        free(curr->input_data);
+        free(curr->output_data);
         free(curr->entangled);
         free((void*)curr->name);
         free(curr);
@@ -81,13 +91,21 @@ void qisc_component_add_output(qisc_component* comp, const char* name, qisc_type
 
 void qisc_component_trigger(qisc_component* comp, void* data, size_t data_size) {
     pthread_mutex_lock(&comp->state_lock);
+    free(comp->input_data);
     comp->state = QISC_STATE_TRIGGERED;
     comp->input_data = malloc(data_size);
-    memcpy(comp->input_data, data, data_size);
+    if (data_size > 0 && data) memcpy(comp->input_data, data, data_size);
     comp->input_data_size = data_size;
     comp->trigger_count++;
     comp->last_trigger_cycle = global_cycle_counter++;
     pthread_cond_signal(&comp->data_ready);
+    pthread_mutex_unlock(&comp->state_lock);
+}
+
+void qisc_component_set_compiled_fn(qisc_component* comp, qisc_component_compiled_fn compiled_fn) {
+    if (!comp) return;
+    pthread_mutex_lock(&comp->state_lock);
+    comp->compiled_fn = compiled_fn;
     pthread_mutex_unlock(&comp->state_lock);
 }
 
@@ -104,15 +122,14 @@ void* qisc_component_run_loop(void* arg) {
         }
         comp->state = QISC_STATE_EXECUTING;
         void* data = comp->input_data;
+        size_t data_size = comp->input_data_size;
+        qisc_component_compiled_fn compiled_fn = comp->compiled_fn;
         pthread_mutex_unlock(&comp->state_lock);
         
-        comp->output_data = malloc(1024);
+        free(comp->output_data);
+        comp->output_data = NULL;
         comp->output_data_size = 0;
-        
-        // Mock execute body
-        // typedef int64_t (*qisc_comp_fn)(void*);
-        // qisc_comp_fn fn = comp->compiled_fn;
-        // if (fn) fn(data);
+        if (compiled_fn) compiled_fn(comp, data, data_size);
         
         free(data);
         
@@ -133,7 +150,9 @@ void* qisc_component_run_loop(void* arg) {
 }
 
 pthread_t qisc_component_start(qisc_component* comp) {
-    pthread_create(&comp->thread_id, NULL, qisc_component_run_loop, comp);
+    if (pthread_create(&comp->thread_id, NULL, qisc_component_run_loop, comp) == 0) {
+        comp->thread_started = true;
+    }
     return comp->thread_id;
 }
 

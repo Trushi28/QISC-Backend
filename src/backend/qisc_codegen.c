@@ -342,10 +342,10 @@ bool qisc_codegen_emit_elf(qisc_ir_module* mod, const char* filepath) {
         }
         
         int active[32]; int num_active = 0;
-        qisc_x86_reg avail_regs[] = {QISC_REG_RCX, QISC_REG_RSI, QISC_REG_RDI, QISC_REG_R8, QISC_REG_R9, QISC_REG_R10};
+        qisc_x86_reg avail_regs[] = {QISC_REG_RCX, QISC_REG_RSI, QISC_REG_RDI, QISC_REG_R8, QISC_REG_R9, QISC_REG_R10, QISC_REG_R11};
         bool reg_free[QISC_REG_COUNT];
         for(int i=0; i<QISC_REG_COUNT; i++) reg_free[i] = false;
-        for(int i=0; i<6; i++) reg_free[avail_regs[i]] = true;
+        for(size_t i=0; i<sizeof(avail_regs) / sizeof(avail_regs[0]); i++) reg_free[avail_regs[i]] = true;
         
         int next_stack_slot = 16;
         

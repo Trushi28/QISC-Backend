@@ -14,7 +14,15 @@ typedef struct {
     const char*       endpoint;
 } qisc_component_port;
 
-typedef struct qisc_component {
+typedef struct qisc_component qisc_component;
+
+typedef void (*qisc_component_compiled_fn)(
+    qisc_component* comp,
+    void* input_data,
+    size_t input_data_size
+);
+
+struct qisc_component {
     const char*           name;
     qisc_ir_function*     body;
     qisc_component_port*  inputs;
@@ -30,17 +38,19 @@ typedef struct qisc_component {
     size_t                input_data_size;
     void*                 output_data;
     size_t                output_data_size;
+    qisc_component_compiled_fn compiled_fn;
     
     volatile bool         should_stop;
     pthread_t             thread_id;
+    bool                  thread_started;
     
     uint64_t              trigger_count;
     uint64_t              last_trigger_cycle;
     
-    struct qisc_component** entangled;
+    qisc_component**        entangled;
     size_t                  num_entangled;
-    struct qisc_component* next;
-} qisc_component;
+    qisc_component*         next;
+};
 
 typedef struct {
     qisc_component* first;
@@ -79,6 +89,11 @@ void qisc_component_trigger(
     qisc_component* comp,
     void* data,
     size_t data_size
+);
+
+void qisc_component_set_compiled_fn(
+    qisc_component* comp,
+    qisc_component_compiled_fn compiled_fn
 );
 
 void* qisc_component_run_loop(void* arg);

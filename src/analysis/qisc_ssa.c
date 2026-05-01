@@ -189,12 +189,15 @@ bool qisc_ssa_destruct(qisc_ir_module* mod) {
             while (i) {
                 qisc_ir_inst* next = i->next;
                 if (i->opcode == QISC_OP_PHI) {
+                    qisc_ir_inst* lowered_value = NULL;
                     for(size_t inc=0; inc<i->phi_num_incoming; inc++) {
                         qisc_ir_block* pred = i->phi_incoming_blocks[inc];
                         qisc_ir_inst* val = i->operands[inc]->as.inst;
                         
                         qisc_value* copy_ops[] = { qisc_value_inst(val) };
                         qisc_ir_inst* copy = qisc_ir_emit_inst(pred, QISC_OP_NOP, i->type, copy_ops, 1);
+                        copy->id = i->id;
+                        if (!lowered_value) lowered_value = copy;
                         
                         if (pred->last_inst && pred->last_inst != copy) {
                             qisc_ir_inst* term = pred->last_inst->prev;
@@ -215,7 +218,7 @@ bool qisc_ssa_destruct(qisc_ir_module* mod) {
                             for (qisc_ir_inst* ui = ub->first_inst; ui; ui = ui->next) {
                                 for (size_t uop=0; uop<ui->num_operands; uop++) {
                                     if (ui->operands[uop]->kind == QISC_VAL_INST && ui->operands[uop]->as.inst == i) {
-                                        ui->operands[uop]->as.inst = copy;
+                                        ui->operands[uop]->as.inst = lowered_value;
                                     }
                                 }
                             }

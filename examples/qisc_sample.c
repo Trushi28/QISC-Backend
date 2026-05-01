@@ -6,6 +6,7 @@
 #include "qisc_codegen.h"
 #include "qisc_convergence.h"
 #include "qisc_living_component.h"
+#include "qisc_backend_bridge.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
@@ -22,6 +23,40 @@ static void comp_double_native(qisc_component* comp, void* input_data, size_t in
     *output = input * 2;
     comp->output_data = output;
     comp->output_data_size = sizeof(*output);
+}
+
+static uint64_t file_hash(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    uint64_t hash = 14695981039346656037ULL;
+    int ch = 0;
+    while ((ch = fgetc(f)) != EOF) {
+        hash ^= (uint8_t)ch;
+        hash *= 1099511628211ULL;
+    }
+    fclose(f);
+    return hash;
+}
+
+static uint64_t build_direct_add_two_object_hash(const char* path) {
+    qisc_ir_module* mod = qisc_ir_create_module();
+    qisc_type* t_int = qisc_type_int();
+    qisc_type* params[] = { t_int, t_int };
+    qisc_ir_function* func = qisc_ir_create_function(mod, "add_two", qisc_type_proc(t_int, params, 2), true);
+    func->profile.execution_count = 1000;
+    qisc_ir_block* block = qisc_ir_create_block(func, "entry", 1.0);
+    qisc_value* p0_ops[] = { qisc_value_param(t_int, 0) };
+    qisc_ir_inst* p0 = qisc_ir_emit_inst(block, QISC_OP_NOP, t_int, p0_ops, 1);
+    qisc_value* p1_ops[] = { qisc_value_param(t_int, 1) };
+    qisc_ir_inst* p1 = qisc_ir_emit_inst(block, QISC_OP_NOP, t_int, p1_ops, 1);
+    qisc_value* add_ops[] = { qisc_value_inst(p0), qisc_value_inst(p1) };
+    qisc_ir_inst* add = qisc_ir_emit_inst(block, QISC_OP_ADD, t_int, add_ops, 2);
+    qisc_value* ret_ops[] = { qisc_value_inst(add) };
+    qisc_ir_emit_inst(block, QISC_OP_RET, t_int, ret_ops, 1);
+    qisc_codegen_emit_elf(mod, path);
+    uint64_t hash = file_hash(path);
+    qisc_ir_destroy_module(mod);
+    return hash;
 }
 
 int main(void) {
@@ -161,13 +196,64 @@ int main(void) {
     qisc_pipeline_print_stats(p);
     qisc_pipeline_destroy(p);
 
+    qisc_ir_function* f_cond = qisc_ir_create_function(mod, "conditional_value", qisc_type_proc(t_int, params1, 1), true);
+    qisc_ir_block* b_cond_entry = qisc_ir_create_block(f_cond, "entry", 1.0);
+    qisc_ir_block* b_cond_true = qisc_ir_create_block(f_cond, "true_block", 0.5);
+    qisc_ir_block* b_cond_false = qisc_ir_create_block(f_cond, "false_block", 0.5);
+    qisc_ir_block* b_cond_merge = qisc_ir_create_block(f_cond, "merge_block", 1.0);
+    b_cond_entry->successors = malloc(2 * sizeof(qisc_ir_block*));
+    b_cond_entry->num_successors = 2;
+    b_cond_entry->successors[0] = b_cond_true;
+    b_cond_entry->successors[1] = b_cond_false;
+    b_cond_true->successors = malloc(sizeof(qisc_ir_block*));
+    b_cond_true->num_successors = 1;
+    b_cond_true->successors[0] = b_cond_merge;
+    b_cond_false->successors = malloc(sizeof(qisc_ir_block*));
+    b_cond_false->num_successors = 1;
+    b_cond_false->successors[0] = b_cond_merge;
+
+    qisc_value* cond_param_ops[] = { qisc_value_param(t_int, 0) };
+    qisc_ir_inst* i_cond_param = qisc_ir_emit_inst(b_cond_entry, QISC_OP_NOP, t_int, cond_param_ops, 1);
+    qisc_value* cond_cmp_ops[] = { qisc_value_inst(i_cond_param), qisc_value_int(0) };
+    qisc_ir_inst* i_cond_cmp = qisc_ir_emit_inst(b_cond_entry, QISC_OP_CMP_EQ, t_int, cond_cmp_ops, 2);
+    qisc_value* cond_br_ops[] = { qisc_value_inst(i_cond_cmp) };
+    qisc_ir_emit_inst(b_cond_entry, QISC_OP_BR_COND, qisc_type_int(), cond_br_ops, 1);
+    qisc_value* true_val_ops[] = { qisc_value_int(5) };
+    qisc_ir_inst* i_cond_true_val = qisc_ir_emit_inst(b_cond_true, QISC_OP_NOP, t_int, true_val_ops, 1);
+    qisc_ir_emit_inst(b_cond_true, QISC_OP_BR, qisc_type_int(), NULL, 0);
+    qisc_value* false_val_ops[] = { qisc_value_int(10) };
+    qisc_ir_inst* i_cond_false_val = qisc_ir_emit_inst(b_cond_false, QISC_OP_NOP, t_int, false_val_ops, 1);
+    i_cond_false_val->id = i_cond_true_val->id;
+    qisc_ir_emit_inst(b_cond_false, QISC_OP_BR, qisc_type_int(), NULL, 0);
+    qisc_value* cond_ret_ops[] = { qisc_value_inst(i_cond_true_val) };
+    qisc_ir_emit_inst(b_cond_merge, QISC_OP_RET, t_int, cond_ret_ops, 1);
+
     // Section 4 — SSA round-trip
     qisc_ir_compute_hash(mod);
-    bool phis = qisc_ssa_construct(mod);
+    qisc_ssa_construct(mod);
+    int phi_count = 0;
+    for (qisc_ir_inst* i = b_cond_merge->first_inst; i; i = i->next) {
+        if (i->opcode == QISC_OP_PHI) phi_count++;
+    }
+    printf("  PHI nodes in conditional_value: %d\n", phi_count);
     qisc_ir_compute_hash(mod);
     qisc_ssa_destruct(mod);
+    int remaining_phis = 0;
+    for (qisc_ir_block* b = f_cond->first_block; b; b = b->next) {
+        for (qisc_ir_inst* i = b->first_inst; i; i = i->next) {
+            if (i->opcode == QISC_OP_PHI) remaining_phis++;
+        }
+    }
     qisc_ir_compute_hash(mod);
-    printf("[PASS] SSA round-trip, phis inserted: %d\n", phis);
+    if (phi_count == 0) {
+        printf("[FAIL] SSA: no PHI at join\n");
+        return 1;
+    }
+    if (remaining_phis != 0) {
+        printf("[FAIL] SSA: PHI survived destruct\n");
+        return 1;
+    }
+    printf("[PASS] SSA round-trip with PHI\n");
 
     // Section 5 — Serialization round-trip
     qisc_ir_serialize(mod, "build/roundtrip.dat");
@@ -179,6 +265,19 @@ int main(void) {
         return 1;
     }
     qisc_ir_destroy_module(mod2);
+    FILE* rf = fopen("build/roundtrip.dat", "rb");
+    if (!rf) {
+        printf("[FAIL] serialization file missing\n");
+        return 1;
+    }
+    fseek(rf, 0, SEEK_END);
+    long sz = ftell(rf);
+    fclose(rf);
+    printf("  roundtrip.dat: %ld bytes\n", sz);
+    if (sz < 200) {
+        printf("[FAIL] serialization too small\n");
+        return 1;
+    }
 
     // Section 6 — Code generation and execution
     qisc_codegen_emit_elf(mod, "build/output.o");
@@ -192,6 +291,7 @@ int main(void) {
     fprintf(f, "extern int64_t mul_test(void);\n");
     fprintf(f, "extern int64_t div_test(void);\n");
     fprintf(f, "extern int64_t cmp_test(void);\n");
+    fprintf(f, "extern int64_t conditional_value(int64_t cond);\n");
     fprintf(f, "extern double float_test(void);\n");
     fprintf(f, "extern const char* string_test(void);\n");
     
@@ -225,8 +325,6 @@ int main(void) {
     qisc_value* d_ops[] = { qisc_value_inst(iawait), qisc_value_int(2) };
     qisc_ir_inst* imul = qisc_ir_emit_inst(b_comp, QISC_OP_MUL, t_int, d_ops, 2);
     qisc_ir_emit_emit(b_comp, qisc_value_inst(imul));
-    // Actually the mock execution for living components in C doesn't use the JIT code, it uses a mock body right now or a fn pointer. 
-    // The instructions say: "Verify output == 42. Print: [PASS] Living Component triggered correctly or [FAIL] component body not wired (honest)"
     
     qisc_component* comp = qisc_component_create(reg, "Doubler", f_comp);
     qisc_component_set_compiled_fn(comp, comp_double_native);
@@ -235,7 +333,7 @@ int main(void) {
     int64_t val = 21;
     qisc_component_trigger(comp, &val, sizeof(val));
     
-    sleep(1); // Wait for processing
+    sleep(1);
     
     pthread_mutex_lock(&comp->state_lock);
     if (comp->output_data_size == sizeof(int64_t) && comp->output_data && *(int64_t*)comp->output_data == 42) {
@@ -250,6 +348,32 @@ int main(void) {
     pthread_mutex_unlock(&comp->state_lock);
 
     qisc_registry_destroy(reg);
+
+    // Section 8 — Bridge API test
+    qisc_backend_options bridge_options = qisc_backend_default_options();
+    bridge_options.max_optimization_cycles = 0;
+    bridge_options.object_path = "build/bridge_add_two.o";
+    qisc_bridge* bridge = qisc_bridge_create("bridge_sample", &bridge_options);
+    int bridge_param_types[] = { QISC_TYPE_INT, QISC_TYPE_INT };
+    qisc_ir_function* bridge_func = qisc_bridge_begin_function(bridge, "add_two", true, 2, bridge_param_types);
+    qisc_ir_block* bridge_block = qisc_bridge_create_block(bridge, bridge_func, "entry", 1.0);
+    qisc_ir_inst* bridge_p0 = qisc_bridge_emit_param(bridge_block, 0);
+    qisc_ir_inst* bridge_p1 = qisc_bridge_emit_param(bridge_block, 1);
+    qisc_ir_inst* bridge_add = qisc_bridge_emit_binary(bridge_block, QISC_OP_ADD, bridge_p0, bridge_p1);
+    qisc_bridge_emit_ret(bridge_block, bridge_add);
+    qisc_bridge_set_profile(bridge, bridge_func, 1000, true);
+    bool bridge_compiled = qisc_bridge_compile(bridge, "build/bridge_add_two.o");
+    qisc_bridge_destroy(bridge);
+    uint64_t direct_hash = build_direct_add_two_object_hash("build/direct_add_two.o");
+    uint64_t bridge_hash = file_hash("build/bridge_add_two.o");
+    if (bridge_compiled && bridge_hash == direct_hash) {
+        printf("[PASS] bridge API\n");
+    } else {
+        printf("[FAIL] bridge API\n");
+        qisc_ir_destroy_module(mod);
+        return 1;
+    }
+
     qisc_ir_destroy_module(mod);
     
     return 0;

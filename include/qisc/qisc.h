@@ -2,6 +2,7 @@
 #define QISC_H
 
 #include "qisc_backend.h"
+#include "qisc_backend_bridge.h"
 #include "qisc_cfg.h"
 #include "qisc_codegen.h"
 #include "qisc_convergence.h"

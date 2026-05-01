@@ -287,19 +287,81 @@ static uint64_t hash_double(uint64_t hash, double val) {
     return hash_uint64(hash, ival);
 }
 
+static uint64_t hash_bytes(uint64_t hash, const void* data, size_t len) {
+    const uint8_t* bytes = (const uint8_t*)data;
+    for (size_t i = 0; i < len; i++) {
+        hash ^= bytes[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static uint64_t hash_string(uint64_t hash, const char* s) {
+    uint64_t len = s ? strlen(s) : 0;
+    hash = hash_uint64(hash, len);
+    return len ? hash_bytes(hash, s, len) : hash;
+}
+
+static uint64_t qisc_block_ordinal(qisc_ir_function* f, qisc_ir_block* target) {
+    uint64_t ordinal = 1;
+    if (!target) return 0;
+    for (qisc_ir_block* b = f->first_block; b; b = b->next) {
+        if (b == target) return ordinal;
+        ordinal++;
+    }
+    return 0;
+}
+
 uint64_t qisc_ir_compute_hash(qisc_ir_module* mod) {
     uint64_t hash = 14695981039346656037ULL;
     for (qisc_ir_function* f = mod->first_func; f; f = f->next) {
-        hash = hash_uint64(hash, f->id);
+        hash = hash_string(hash, f->name);
         hash = hash_uint64(hash, f->profile.execution_count);
         hash = hash_uint64(hash, f->profile.is_hot);
+        hash = hash_uint64(hash, f->is_in_ssa_form);
+        hash = hash_uint64(hash, f->type ? f->type->num_params : 0);
+        if (f->type) {
+            for (size_t p = 0; p < f->type->num_params; p++) {
+                hash = hash_uint64(hash, f->type->params[p] ? f->type->params[p]->kind : QISC_TYPE_VOID);
+            }
+        }
         for (qisc_ir_block* b = f->first_block; b; b = b->next) {
-            hash = hash_uint64(hash, b->id);
+            hash = hash_string(hash, b->name);
             hash = hash_double(hash, b->profile.branch_probability);
+            hash = hash_uint64(hash, b->num_successors);
+            for (size_t s = 0; s < b->num_successors; s++) {
+                hash = hash_uint64(hash, qisc_block_ordinal(f, b->successors[s]));
+            }
             for (qisc_ir_inst* i = b->first_inst; i; i = i->next) {
-                hash = hash_uint64(hash, i->id);
                 hash = hash_uint64(hash, i->opcode);
                 hash = hash_uint64(hash, i->comp_state);
+                hash = hash_uint64(hash, i->num_operands);
+                for (size_t op = 0; op < i->num_operands; op++) {
+                    qisc_value* v = i->operands[op];
+                    hash = hash_uint64(hash, v->kind);
+                    switch (v->kind) {
+                        case QISC_VAL_CONST_INT:
+                            hash = hash_uint64(hash, (uint64_t)v->as.i_val);
+                            break;
+                        case QISC_VAL_CONST_FLOAT:
+                            hash = hash_double(hash, v->as.f_val);
+                            break;
+                        case QISC_VAL_CONST_BOOL:
+                            hash = hash_uint64(hash, v->as.b_val);
+                            break;
+                        case QISC_VAL_CONST_STRING:
+                            hash = hash_string(hash, v->as.s_val);
+                            break;
+                        case QISC_VAL_INST:
+                            hash = hash_uint64(hash, v->as.inst ? v->as.inst->id : 0);
+                            break;
+                        case QISC_VAL_PARAM:
+                            hash = hash_uint64(hash, v->as.param_idx);
+                            break;
+                        case QISC_VAL_UNDEF:
+                            break;
+                    }
+                }
             }
         }
     }
@@ -464,13 +526,14 @@ bool qisc_ir_serialize(qisc_ir_module* mod, const char* filepath) {
     fwrite(&ir_hash, sizeof(ir_hash), 1, f);
     
     for (qisc_ir_function* func = mod->first_func; func; func = func->next) {
-        fwrite(&func->id, sizeof(uint32_t), 1, f);
         uint32_t name_len = strlen(func->name);
         fwrite(&name_len, sizeof(name_len), 1, f);
         fwrite(func->name, 1, name_len, f);
         
         uint8_t is_hot = func->profile.is_hot ? 1 : 0;
+        uint8_t is_in_ssa_form = func->is_in_ssa_form ? 1 : 0;
         fwrite(&is_hot, sizeof(is_hot), 1, f);
+        fwrite(&is_in_ssa_form, sizeof(is_in_ssa_form), 1, f);
         fwrite(&func->profile.execution_count, sizeof(uint64_t), 1, f);
         
         uint32_t num_params = func->type ? func->type->num_params : 0;
@@ -542,142 +605,212 @@ bool qisc_ir_serialize(qisc_ir_module* mod, const char* filepath) {
 
 qisc_ir_module* qisc_ir_deserialize(const char* filepath) {
     FILE* f = fopen(filepath, "rb");
-    if (!f) return NULL;
+    if (!f) {
+        fprintf(stderr, "qisc_ir_deserialize: unable to open %s\n", filepath);
+        return NULL;
+    }
     
     uint32_t magic = 0, version = 0, num_funcs = 0;
     uint64_t expected_hash = 0;
     
-    if (fread(&magic, sizeof(magic), 1, f) != 1) { fclose(f); return NULL; }
-    if (fread(&version, sizeof(version), 1, f) != 1) { fclose(f); return NULL; }
-    
-    if (magic != QISC_MAGIC_HEADER || (version != 1 && version != 2)) {
+    if (fread(&magic, sizeof(magic), 1, f) != 1) {
+        fprintf(stderr, "qisc_ir_deserialize: missing magic\n");
+        fclose(f);
+        return NULL;
+    }
+    if (fread(&version, sizeof(version), 1, f) != 1) {
+        fprintf(stderr, "qisc_ir_deserialize: missing version\n");
         fclose(f);
         return NULL;
     }
     
-    if (version == 2) {
-        if (fread(&num_funcs, sizeof(num_funcs), 1, f) != 1) { fclose(f); return NULL; }
-        if (fread(&expected_hash, sizeof(expected_hash), 1, f) != 1) { fclose(f); return NULL; }
+    if (magic != QISC_MAGIC_HEADER || (version != 1 && version != 2)) {
+        fprintf(stderr, "qisc_ir_deserialize: invalid header magic=%08x version=%u\n", magic, version);
+        fclose(f);
+        return NULL;
+    }
+    
+    if (fread(&num_funcs, sizeof(num_funcs), 1, f) != 1) {
+        fprintf(stderr, "qisc_ir_deserialize: missing function count\n");
+        fclose(f);
+        return NULL;
+    }
+    if (fread(&expected_hash, sizeof(expected_hash), 1, f) != 1) {
+        fprintf(stderr, "qisc_ir_deserialize: missing IR hash\n");
+        fclose(f);
+        return NULL;
     }
     
     qisc_ir_module* mod = qisc_ir_create_module();
-    qisc_ir_inst* inst_lookup[10000] = {0}; // Simplified flat lookup
+    qisc_ir_inst* inst_lookup[10000] = {0};
     qisc_ir_block* block_lookup[10000] = {0};
     
     for (uint32_t fn = 0; fn < num_funcs; fn++) {
-        uint32_t f_id = 0;
-        if (version == 2) {
-            if (fread(&f_id, sizeof(f_id), 1, f) != 1) { fclose(f); return NULL; }
-        }
         uint32_t name_len = 0;
-        if (fread(&name_len, sizeof(name_len), 1, f) != 1) { fclose(f); return NULL; }
-        char name[256] = {0};
-        if (name_len > 255) name_len = 255;
-        if (fread(name, 1, name_len, f) != name_len) { fclose(f); return NULL; }
+        if (fread(&name_len, sizeof(name_len), 1, f) != 1) goto fail_read;
+        char* name = (char*)calloc((size_t)name_len + 1, 1);
+        if (!name) goto fail_alloc;
+        if (fread(name, 1, name_len, f) != name_len) {
+            free(name);
+            goto fail_read;
+        }
         
         uint8_t is_hot = 0;
-        if (fread(&is_hot, sizeof(is_hot), 1, f) != 1) { fclose(f); return NULL; }
+        uint8_t is_in_ssa_form = 0;
+        if (fread(&is_hot, sizeof(is_hot), 1, f) != 1) {
+            free(name);
+            goto fail_read;
+        }
+        if (version >= 2) {
+            if (fread(&is_in_ssa_form, sizeof(is_in_ssa_form), 1, f) != 1) {
+                free(name);
+                goto fail_read;
+            }
+        }
         uint64_t exec_count = 0;
-        if (fread(&exec_count, sizeof(exec_count), 1, f) != 1) { fclose(f); return NULL; }
+        if (fread(&exec_count, sizeof(exec_count), 1, f) != 1) {
+            free(name);
+            goto fail_read;
+        }
         
         uint32_t num_params = 0;
-        if (fread(&num_params, sizeof(num_params), 1, f) != 1) { fclose(f); return NULL; }
+        if (fread(&num_params, sizeof(num_params), 1, f) != 1) {
+            free(name);
+            goto fail_read;
+        }
         
         qisc_type** params = NULL;
         if (num_params > 0) {
             params = malloc(num_params * sizeof(qisc_type*));
+            if (!params) {
+                free(name);
+                goto fail_alloc;
+            }
             for(uint32_t p=0; p<num_params; p++) {
                 uint32_t tk;
-                if (fread(&tk, sizeof(tk), 1, f) != 1) { fclose(f); return NULL; }
+                if (fread(&tk, sizeof(tk), 1, f) != 1) {
+                    free(name);
+                    free(params);
+                    goto fail_read;
+                }
                 params[p] = calloc(1, sizeof(qisc_type));
+                if (!params[p]) {
+                    free(name);
+                    free(params);
+                    goto fail_alloc;
+                }
                 params[p]->kind = (qisc_type_kind)tk;
             }
         }
         
         qisc_ir_function* func = qisc_ir_create_function(mod, name, qisc_type_proc(qisc_type_int(), params, num_params), is_hot != 0);
-        if (version == 2) func->id = f_id;
+        free(name);
         func->profile.execution_count = exec_count;
+        func->is_in_ssa_form = is_in_ssa_form != 0;
         if (params) free(params);
         
         uint32_t num_blocks = 0;
-        if (fread(&num_blocks, sizeof(num_blocks), 1, f) != 1) { fclose(f); return NULL; }
+        if (fread(&num_blocks, sizeof(num_blocks), 1, f) != 1) goto fail_read;
         
         for (uint32_t bk = 0; bk < num_blocks; bk++) {
             uint32_t b_id;
-            if (fread(&b_id, sizeof(b_id), 1, f) != 1) { fclose(f); return NULL; }
+            if (fread(&b_id, sizeof(b_id), 1, f) != 1) goto fail_read;
             uint32_t b_name_len;
-            if (fread(&b_name_len, sizeof(b_name_len), 1, f) != 1) { fclose(f); return NULL; }
-            char bname[256] = {0};
-            if (b_name_len > 255) b_name_len = 255;
-            if (fread(bname, 1, b_name_len, f) != b_name_len) { fclose(f); return NULL; }
+            if (fread(&b_name_len, sizeof(b_name_len), 1, f) != 1) goto fail_read;
+            char* bname = (char*)calloc((size_t)b_name_len + 1, 1);
+            if (!bname) goto fail_alloc;
+            if (fread(bname, 1, b_name_len, f) != b_name_len) {
+                free(bname);
+                goto fail_read;
+            }
             
             double bprob;
-            if (fread(&bprob, sizeof(bprob), 1, f) != 1) { fclose(f); return NULL; }
+            if (fread(&bprob, sizeof(bprob), 1, f) != 1) {
+                free(bname);
+                goto fail_read;
+            }
             
             qisc_ir_block* block = qisc_ir_create_block(func, bname, bprob);
+            free(bname);
             block->id = b_id;
             if (b_id < 10000) block_lookup[b_id] = block;
             
             uint32_t num_succ = 0;
-            if (fread(&num_succ, sizeof(num_succ), 1, f) != 1) { fclose(f); return NULL; }
+            if (fread(&num_succ, sizeof(num_succ), 1, f) != 1) goto fail_read;
             
             uint32_t* succ_ids = NULL;
             if (num_succ > 0) {
                 succ_ids = malloc(num_succ * sizeof(uint32_t));
+                if (!succ_ids) goto fail_alloc;
                 for(uint32_t s=0; s<num_succ; s++) {
-                    if (fread(&succ_ids[s], sizeof(uint32_t), 1, f) != 1) { fclose(f); return NULL; }
+                    if (fread(&succ_ids[s], sizeof(uint32_t), 1, f) != 1) {
+                        free(succ_ids);
+                        goto fail_read;
+                    }
                 }
-                // We stash these temp ids in successors to relink later
                 block->successors = (qisc_ir_block**)succ_ids;
                 block->num_successors = num_succ;
             }
             
             uint32_t num_insts = 0;
-            if (fread(&num_insts, sizeof(num_insts), 1, f) != 1) { fclose(f); return NULL; }
+            if (fread(&num_insts, sizeof(num_insts), 1, f) != 1) goto fail_read;
             
             for (uint32_t in = 0; in < num_insts; in++) {
                 uint32_t i_id, opc, num_ops;
-                if (fread(&i_id, sizeof(i_id), 1, f) != 1) { fclose(f); return NULL; }
-                if (fread(&opc, sizeof(opc), 1, f) != 1) { fclose(f); return NULL; }
-                if (fread(&num_ops, sizeof(num_ops), 1, f) != 1) { fclose(f); return NULL; }
+                if (fread(&i_id, sizeof(i_id), 1, f) != 1) goto fail_read;
+                if (fread(&opc, sizeof(opc), 1, f) != 1) goto fail_read;
+                if (fread(&num_ops, sizeof(num_ops), 1, f) != 1) goto fail_read;
                 
                 qisc_value** ops = NULL;
                 if (num_ops > 0) ops = malloc(num_ops * sizeof(qisc_value*));
+                if (num_ops > 0 && !ops) goto fail_alloc;
                 
                 for(uint32_t op = 0; op < num_ops; op++) {
                     uint32_t kind;
-                    if (fread(&kind, sizeof(kind), 1, f) != 1) { fclose(f); return NULL; }
+                    if (fread(&kind, sizeof(kind), 1, f) != 1) goto fail_read;
                     
                     if (kind == QISC_VAL_CONST_INT) {
                         int64_t val;
-                        if (fread(&val, sizeof(val), 1, f) != 1) { fclose(f); return NULL; }
+                        if (fread(&val, sizeof(val), 1, f) != 1) goto fail_read;
                         ops[op] = qisc_value_int(val);
                     } else if (kind == QISC_VAL_CONST_FLOAT) {
                         double val;
-                        if (fread(&val, sizeof(val), 1, f) != 1) { fclose(f); return NULL; }
+                        if (fread(&val, sizeof(val), 1, f) != 1) goto fail_read;
                         ops[op] = qisc_value_float(val);
                     } else if (kind == QISC_VAL_CONST_BOOL) {
                         uint8_t val;
-                        if (fread(&val, sizeof(val), 1, f) != 1) { fclose(f); return NULL; }
+                        if (fread(&val, sizeof(val), 1, f) != 1) goto fail_read;
                         ops[op] = qisc_value_bool(val != 0);
                     } else if (kind == QISC_VAL_CONST_STRING) {
                         uint32_t slen;
-                        if (fread(&slen, sizeof(slen), 1, f) != 1) { fclose(f); return NULL; }
-                        char sbuf[256] = {0};
-                        if (slen > 255) slen = 255;
-                        if (fread(sbuf, 1, slen, f) != slen) { fclose(f); return NULL; }
+                        if (fread(&slen, sizeof(slen), 1, f) != 1) goto fail_read;
+                        char* sbuf = (char*)calloc((size_t)slen + 1, 1);
+                        if (!sbuf) goto fail_alloc;
+                        if (fread(sbuf, 1, slen, f) != slen) {
+                            free(sbuf);
+                            goto fail_read;
+                        }
                         ops[op] = qisc_value_string(sbuf);
+                        free(sbuf);
                     } else if (kind == QISC_VAL_INST) {
                         uint32_t ref_id;
-                        if (fread(&ref_id, sizeof(ref_id), 1, f) != 1) { fclose(f); return NULL; }
+                        if (fread(&ref_id, sizeof(ref_id), 1, f) != 1) goto fail_read;
                         qisc_value* v = calloc(1, sizeof(qisc_value));
+                        if (!v) goto fail_alloc;
                         v->kind = QISC_VAL_INST;
-                        v->as.inst = (qisc_ir_inst*)(uintptr_t)ref_id; // Stash id
+                        v->as.inst = (qisc_ir_inst*)(uintptr_t)ref_id;
                         ops[op] = v;
                     } else if (kind == QISC_VAL_PARAM) {
                         uint32_t pidx;
-                        if (fread(&pidx, sizeof(pidx), 1, f) != 1) { fclose(f); return NULL; }
+                        if (fread(&pidx, sizeof(pidx), 1, f) != 1) goto fail_read;
                         ops[op] = qisc_value_param(qisc_type_int(), pidx);
+                    } else if (kind == QISC_VAL_UNDEF) {
+                        ops[op] = calloc(1, sizeof(qisc_value));
+                        if (!ops[op]) goto fail_alloc;
+                        ops[op]->kind = QISC_VAL_UNDEF;
+                    } else {
+                        fprintf(stderr, "qisc_ir_deserialize: invalid operand kind %u\n", kind);
+                        goto fail;
                     }
                 }
                 
@@ -696,8 +829,13 @@ qisc_ir_module* qisc_ir_deserialize(const char* filepath) {
                 uint32_t* stored_ids = (uint32_t*)b_ptr->successors;
                 qisc_ir_block** real_succs = malloc(b_ptr->num_successors * sizeof(qisc_ir_block*));
                 for(size_t s=0; s<b_ptr->num_successors; s++) {
-                    uint32_t sid = stored_ids[s];
-                    real_succs[s] = sid < 10000 ? block_lookup[sid] : NULL;
+                        uint32_t sid = stored_ids[s];
+                        real_succs[s] = sid < 10000 ? block_lookup[sid] : NULL;
+                        if (!real_succs[s]) {
+                            free(real_succs);
+                            fprintf(stderr, "qisc_ir_deserialize: unknown successor block id %u\n", sid);
+                            goto fail;
+                        }
                 }
                 free(stored_ids);
                 b_ptr->successors = real_succs;
@@ -709,6 +847,10 @@ qisc_ir_module* qisc_ir_deserialize(const char* filepath) {
                     if (i_ptr->operands[op]->kind == QISC_VAL_INST) {
                         uint32_t ref_id = (uint32_t)(uintptr_t)i_ptr->operands[op]->as.inst;
                         i_ptr->operands[op]->as.inst = ref_id < 10000 ? inst_lookup[ref_id] : NULL;
+                        if (ref_id != 0 && !i_ptr->operands[op]->as.inst) {
+                            fprintf(stderr, "qisc_ir_deserialize: unknown instruction id %u\n", ref_id);
+                            goto fail;
+                        }
                         if (i_ptr->operands[op]->as.inst) i_ptr->operands[op]->type = i_ptr->operands[op]->as.inst->type;
                     }
                 }
@@ -720,11 +862,21 @@ qisc_ir_module* qisc_ir_deserialize(const char* filepath) {
     
     uint64_t actual_hash = qisc_ir_compute_hash(mod);
     if (actual_hash != expected_hash) {
-        printf("ERROR: Hash mismatch during deserialization! Expected %016llx, got %016llx\n", 
+        fprintf(stderr, "qisc_ir_deserialize: hash mismatch expected %016llx got %016llx\n", 
                (unsigned long long)expected_hash, (unsigned long long)actual_hash);
         qisc_ir_destroy_module(mod);
         return NULL;
     }
     
     return mod;
+
+fail_read:
+    fprintf(stderr, "qisc_ir_deserialize: truncated or malformed file %s\n", filepath);
+    goto fail;
+fail_alloc:
+    fprintf(stderr, "qisc_ir_deserialize: allocation failed\n");
+fail:
+    fclose(f);
+    qisc_ir_destroy_module(mod);
+    return NULL;
 }

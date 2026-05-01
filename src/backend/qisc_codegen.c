@@ -143,6 +143,9 @@ void emit_rex(qisc_bytebuf* buf, int w, int r, int x, int b) {
     uint8_t rex = 0x40 | (w<<3) | (r<<2) | (x<<1) | b;
     bytebuf_push(buf, rex);
 }
+static void emit_rex_w(qisc_bytebuf* buf) {
+    bytebuf_push(buf, 0x48);
+}
 void emit_rex_op(qisc_bytebuf* buf, int dst, int src) {
     emit_rex(buf, 1, dst >= 8 ? 1 : 0, 0, src >= 8 ? 1 : 0);
 }
@@ -467,15 +470,25 @@ bool qisc_codegen_emit_elf(qisc_ir_module* mod, const char* filepath) {
                         if (dst_reg != op0) { bytebuf_push(buf, 0xF2); bytebuf_push(buf, 0x0F); bytebuf_push(buf, 0x10); emit_modrm(buf, 3, dst_reg, op0); }
                         bytebuf_push(buf, 0xF2); bytebuf_push(buf, 0x0F); bytebuf_push(buf, 0x5E); emit_modrm(buf, 3, dst_reg, op1);
                     } else {
-                        int rdx_spill_slot = -1;
-                    for (int j = 0; j < num_active; j++) {
-                        int act_idx = active[j];
-                        if (intervals[act_idx].reg == QISC_REG_RDX && intervals[act_idx].end > current_inst_index - 1) {
+                    bool rdx_was_spilled = false;
+                    int rdx_spill_slot = -1;
+                    for (int j = 0; j < num_intervals; j++) {
+                        if (intervals[j].stack_slot == -1 &&
+                            intervals[j].reg == QISC_REG_RDX &&
+                            intervals[j].start <= current_inst_index - 1 &&
+                            intervals[j].end > current_inst_index - 1) {
                             rdx_spill_slot = next_stack_slot;
                             next_stack_slot += 8;
-                            // mov [rbp-slot], rdx (RDX is reg 2)
-                            emit_rex_op(buf, 2, 5); bytebuf_push(buf, 0x89); emit_modrm(buf, 2, 2, 5);
-                            bytebuf_push_u32(buf, (uint32_t)(-rdx_spill_slot));
+                            rdx_was_spilled = true;
+                            emit_rex_w(buf);
+                            bytebuf_push(buf, 0x89);
+                            if (rdx_spill_slot <= 127) {
+                                bytebuf_push(buf, 0x55);
+                                bytebuf_push(buf, (uint8_t)(-(int8_t)rdx_spill_slot));
+                            } else {
+                                emit_modrm(buf, 2, 2, 5);
+                                bytebuf_push_u32(buf, (uint32_t)(-rdx_spill_slot));
+                            }
                             break;
                         }
                     }
@@ -484,10 +497,16 @@ bool qisc_codegen_emit_elf(qisc_ir_module* mod, const char* filepath) {
                     bytebuf_push(buf, 0x48); bytebuf_push(buf, 0x99); // cqo
                     int op1 = load_operand(buf, i->operands[1], id_to_inter, 11, &rodata_buffer, r_relocs, &num_r_relocs, f);
                     emit_rex_op(buf, 0, op1); bytebuf_push(buf, 0xF7); emit_modrm(buf, 3, 7, op1);
-                    if (rdx_spill_slot != -1) {
-                        // mov rdx, [rbp-slot]
-                        emit_rex_op(buf, 2, 5); bytebuf_push(buf, 0x8B); emit_modrm(buf, 2, 2, 5);
-                        bytebuf_push_u32(buf, (uint32_t)(-rdx_spill_slot));
+                    if (rdx_was_spilled) {
+                        emit_rex_w(buf);
+                        bytebuf_push(buf, 0x8B);
+                        if (rdx_spill_slot <= 127) {
+                            bytebuf_push(buf, 0x55);
+                            bytebuf_push(buf, (uint8_t)(-(int8_t)rdx_spill_slot));
+                        } else {
+                            emit_modrm(buf, 2, 2, 5);
+                            bytebuf_push_u32(buf, (uint32_t)(-rdx_spill_slot));
+                        }
                     }
                     if (dst_reg != 0) { emit_rex_op(buf, dst_reg, 0); bytebuf_push(buf, 0x8B); emit_modrm(buf, 3, dst_reg, 0); }
                 }
@@ -503,7 +522,7 @@ bool qisc_codegen_emit_elf(qisc_ir_module* mod, const char* filepath) {
                     emit_rex_op(buf, dst_reg, 0); bytebuf_push(buf, 0x0F); bytebuf_push(buf, 0xB6); emit_modrm(buf, 3, dst_reg, 0);
                 } else if (i->opcode == QISC_OP_LOAD) {
                     int src = load_operand(buf, i->operands[0], id_to_inter, 11, &rodata_buffer, r_relocs, &num_r_relocs, f);
-                    uint32_t offset = 0; // Simple mock struct offset support
+                    uint32_t offset = 0;
                     if (offset > 0) {
                         emit_rex_op(buf, dst_reg, src); bytebuf_push(buf, 0x8B); emit_modrm(buf, 2, dst_reg, src);
                         bytebuf_push_u32(buf, offset);
@@ -650,8 +669,16 @@ bool qisc_codegen_emit_elf(qisc_ir_module* mod, const char* filepath) {
     strtab_size += strlen("__qisc_pipeline") + 1;
     
     size_t shstrtab_offset = strtab_offset + strtab_size;
-    const char* shstrtab = "\0.text.hot\0.text.cold\0.rodata\0.symtab\0.strtab\0.shstrtab\0.rela.text\0";
-    size_t shstrtab_size = 67; // exact bytes
+    const char* shstrtab = "\0.text.hot\0.text.cold\0.rodata\0.symtab\0.strtab\0.shstrtab\0.rela.text\0.note.GNU-stack\0";
+    uint32_t sh_name_text_hot = 1;
+    uint32_t sh_name_text_cold = sh_name_text_hot + strlen(".text.hot") + 1;
+    uint32_t sh_name_rodata = sh_name_text_cold + strlen(".text.cold") + 1;
+    uint32_t sh_name_symtab = sh_name_rodata + strlen(".rodata") + 1;
+    uint32_t sh_name_strtab = sh_name_symtab + strlen(".symtab") + 1;
+    uint32_t sh_name_shstrtab = sh_name_strtab + strlen(".strtab") + 1;
+    uint32_t sh_name_rela_text = sh_name_shstrtab + strlen(".shstrtab") + 1;
+    uint32_t sh_name_note_gnu_stack = sh_name_rela_text + strlen(".rela.text") + 1;
+    size_t shstrtab_size = sh_name_note_gnu_stack + strlen(".note.GNU-stack") + 1;
     size_t rela_offset = shstrtab_offset + shstrtab_size;
     size_t rela_size = (num_relocs + num_r_relocs) * sizeof(Elf64_Rela);
     size_t shdr_offset = rela_offset + rela_size;
@@ -662,7 +689,7 @@ bool qisc_codegen_emit_elf(qisc_ir_module* mod, const char* filepath) {
     ehdr.e_ident[4] = 2; ehdr.e_ident[5] = 1; ehdr.e_ident[6] = 1;
     ehdr.e_type = 1; ehdr.e_machine = 62; ehdr.e_version = 1;
     ehdr.e_shoff = shdr_offset; ehdr.e_ehsize = 64; ehdr.e_shentsize = 64;
-    ehdr.e_shnum = 8; ehdr.e_shstrndx = 6;
+    ehdr.e_shnum = 9; ehdr.e_shstrndx = 6;
     
     FILE* f = fopen(filepath, "wb");
     fwrite(&ehdr, sizeof(ehdr), 1, f);
@@ -765,16 +792,17 @@ bool qisc_codegen_emit_elf(qisc_ir_module* mod, const char* filepath) {
     size_t pad = shdr_offset - ftell(f);
     while (pad--) fwrite(&zero, 1, 1, f);
     
-    Elf64_Shdr shdrs[8]; memset(shdrs, 0, sizeof(shdrs));
-    shdrs[1].sh_name = 1; shdrs[1].sh_type = 1; shdrs[1].sh_flags = 6; shdrs[1].sh_offset = hot_offset; shdrs[1].sh_size = hot_code_size;
-    shdrs[2].sh_name = 11; shdrs[2].sh_type = 1; shdrs[2].sh_flags = 6; shdrs[2].sh_offset = cold_offset; shdrs[2].sh_size = cold_code_size;
-    shdrs[3].sh_name = 22; shdrs[3].sh_type = 1; shdrs[3].sh_flags = 2; shdrs[3].sh_offset = rodata_offset; shdrs[3].sh_size = rodata_buffer.size; // .rodata
-    shdrs[4].sh_name = 30; shdrs[4].sh_type = 2; shdrs[4].sh_offset = symtab_offset; shdrs[4].sh_size = symtab_size; shdrs[4].sh_link = 5; shdrs[4].sh_info = 9; shdrs[4].sh_entsize = 24;
-    shdrs[5].sh_name = 38; shdrs[5].sh_type = 3; shdrs[5].sh_offset = strtab_offset; shdrs[5].sh_size = strtab_size;
-    shdrs[6].sh_name = 46; shdrs[6].sh_type = 3; shdrs[6].sh_offset = shstrtab_offset; shdrs[6].sh_size = shstrtab_size;
-    shdrs[7].sh_name = 56; shdrs[7].sh_type = 4; shdrs[7].sh_offset = rela_offset; shdrs[7].sh_size = rela_size; shdrs[7].sh_link = 4; shdrs[7].sh_info = 1; shdrs[7].sh_entsize = 24;
+    Elf64_Shdr shdrs[9]; memset(shdrs, 0, sizeof(shdrs));
+    shdrs[1].sh_name = sh_name_text_hot; shdrs[1].sh_type = 1; shdrs[1].sh_flags = 6; shdrs[1].sh_offset = hot_offset; shdrs[1].sh_size = hot_code_size;
+    shdrs[2].sh_name = sh_name_text_cold; shdrs[2].sh_type = 1; shdrs[2].sh_flags = 6; shdrs[2].sh_offset = cold_offset; shdrs[2].sh_size = cold_code_size;
+    shdrs[3].sh_name = sh_name_rodata; shdrs[3].sh_type = 1; shdrs[3].sh_flags = 2; shdrs[3].sh_offset = rodata_offset; shdrs[3].sh_size = rodata_buffer.size;
+    shdrs[4].sh_name = sh_name_symtab; shdrs[4].sh_type = 2; shdrs[4].sh_offset = symtab_offset; shdrs[4].sh_size = symtab_size; shdrs[4].sh_link = 5; shdrs[4].sh_info = 9; shdrs[4].sh_entsize = 24;
+    shdrs[5].sh_name = sh_name_strtab; shdrs[5].sh_type = 3; shdrs[5].sh_offset = strtab_offset; shdrs[5].sh_size = strtab_size;
+    shdrs[6].sh_name = sh_name_shstrtab; shdrs[6].sh_type = 3; shdrs[6].sh_offset = shstrtab_offset; shdrs[6].sh_size = shstrtab_size;
+    shdrs[7].sh_name = sh_name_rela_text; shdrs[7].sh_type = 4; shdrs[7].sh_offset = rela_offset; shdrs[7].sh_size = rela_size; shdrs[7].sh_link = 4; shdrs[7].sh_info = 1; shdrs[7].sh_entsize = 24;
+    shdrs[8].sh_name = sh_name_note_gnu_stack; shdrs[8].sh_type = 1; shdrs[8].sh_offset = shdr_offset; shdrs[8].sh_addralign = 1;
     
-    fwrite(shdrs, sizeof(Elf64_Shdr), 8, f);
+    fwrite(shdrs, sizeof(Elf64_Shdr), 9, f);
     fclose(f);
     
     for (int i=0; i<num_func_codes; i++) bytebuf_free(&func_codes[i].buf);
